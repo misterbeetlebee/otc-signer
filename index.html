@@ -1,0 +1,171 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Wagyu OTC — Sign a Swap Order</title>
+<style>
+  :root { --bg:#0f1216; --card:#171b21; --line:#2a313b; --fg:#e8edf2; --muted:#8b97a6;
+          --accent:#3ea76a; --accent2:#2c855380; --warn:#e0b341; --err:#e0594b; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg);
+         font:15px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif; }
+  main { max-width:620px; margin:0 auto; padding:24px 18px 60px; }
+  h1 { font-size:21px; margin:0 0 4px; }
+  .sub { color:var(--muted); margin:0 0 20px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:12px;
+          padding:16px; margin:14px 0; }
+  label { display:block; font-weight:600; margin:14px 0 6px; }
+  label:first-child { margin-top:0; }
+  input, textarea { width:100%; padding:11px 12px; border:1px solid var(--line);
+          border-radius:9px; background:#0c0f13; color:var(--fg); font:inherit; }
+  textarea { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:13px; resize:vertical; }
+  button { background:var(--accent); color:#fff; border:0; border-radius:9px;
+           padding:12px 18px; font:inherit; font-weight:600; cursor:pointer; }
+  button:disabled { background:var(--accent2); color:#c8d2dc99; cursor:not-allowed; }
+  button.secondary { background:#222a33; }
+  .muted { color:var(--muted); font-size:13px; }
+  .mono { font-family:ui-monospace,Menlo,monospace; word-break:break-all; }
+  pre { background:#0c0f13; border:1px solid var(--line); border-radius:9px; padding:12px;
+        overflow:auto; font-size:12.5px; white-space:pre-wrap; word-break:break-word; }
+  .banner { border-left:3px solid var(--accent); background:#13241a; padding:10px 12px;
+            border-radius:6px; font-size:13.5px; }
+  .warn { border-left:3px solid var(--warn); background:#241f10; padding:10px 12px;
+          border-radius:6px; font-size:13px; margin-top:10px; }
+  .err { color:var(--err); min-height:20px; margin:10px 0 0; font-size:14px; }
+  code { background:#0c0f13; padding:2px 5px; border-radius:5px; }
+  .ok { color:var(--accent); }
+</style>
+</head>
+<body>
+<main>
+  <h1>Wagyu OTC — Sign a Swap Order</h1>
+  <p class="sub">Swap USDC (Arbitrum) → XMR. You authorize each order by signing it with your own
+  wallet — copy the result into Signal.</p>
+
+  <div class="banner">
+    🔒 This page runs <b>entirely in your browser</b>. Your private key never leaves your wallet,
+    and nothing is sent anywhere until <b>you</b> copy the order into Signal yourself.
+  </div>
+
+  <div class="card">
+    <button id="connect">Connect wallet</button>
+    <div id="acct" class="muted" style="margin-top:10px"></div>
+  </div>
+
+  <div class="card">
+    <label for="amount">Amount (USDC)</label>
+    <input id="amount" type="text" inputmode="decimal" placeholder="e.g. 250" autocomplete="off">
+    <label for="toxmr">Destination Monero address (where you receive XMR)</label>
+    <input id="toxmr" type="text" placeholder="4… or 8…" autocomplete="off" spellcheck="false">
+    <p class="muted" style="margin:14px 0 0">A fresh nonce + 1-hour expiry are added automatically.</p>
+    <div style="margin-top:14px"><button id="sign" disabled>Sign order</button></div>
+    <p class="err" id="err"></p>
+  </div>
+
+  <div class="card" id="out" hidden>
+    <p style="margin-top:0"><b>Message your wallet signed</b> (verify it matched the wallet popup):</p>
+    <pre id="msg"></pre>
+    <p><b>Send THIS to the desk on Signal</b> (<span class="mono" id="signo"></span>):</p>
+    <textarea id="json" readonly rows="6"></textarea>
+    <div style="margin-top:10px"><button id="copy">Copy order</button></div>
+    <div class="warn" style="margin-top:14px">
+      After the desk replies <span class="ok">✅ ACCEPTED</span>, send exactly
+      <b id="amt2"></b> USDC — <b>native USDC on Arbitrum One</b> — <b>from</b>
+      <span class="mono" id="from2"></span> <b>to the desk address:</b><br>
+      <code class="mono" id="dep"></code><br>
+      ⚠️ That is the <b>only</b> destination. Never send to the USDC token contract — funds sent
+      there are lost.
+    </div>
+  </div>
+
+  <p class="muted">USDC-in → XMR-out · floating rate · desk + network fees apply (see the API doc).</p>
+</main>
+
+<script>
+// ─── Desk constants (operator: edit if these change) ───────────────────────────
+const DESK = {
+  signalNumber:   "+18633695803",                                  // where the client sends the signed order
+  depositAddress: "0x912500ffadc00c6B84F0dA6ACD4433F67D973444",    // Arbitrum One, native USDC ONLY
+  minUsdc: 10,
+  maxUsdc: 50000,
+  expirySeconds: 3600,
+};
+// ───────────────────────────────────────────────────────────────────────────────
+
+const $ = id => document.getElementById(id);
+let account = null;
+const setErr = m => { $('err').textContent = m || ''; };
+
+// Mirror the bot's looks_like_monero_address: 95 or 106 base58 chars, starts 4 or 8, alphanumeric.
+const looksXmr = a => /^[0-9A-Za-z]+$/.test(a) && (a.length === 95 || a.length === 106) && (a[0] === '4' || a[0] === '8');
+
+// EXACT canonical message the bot reconstructs + verifies (bot/broker_api.py canonical_message).
+// 7 lines, '\n'-joined, no trailing newline, fields verbatim. Any change → different signer.
+function canonical(amount, from, toXmr, nonce, expiry) {
+  return [
+    "Wagyu OTC Swap Order", "version:1",
+    "amount_usdc:" + amount, "from:" + from, "to_xmr:" + toXmr,
+    "nonce:" + nonce, "expiry:" + expiry,
+  ].join("\n");
+}
+// personal_sign over the UTF-8 bytes of the message (EIP-191) — matches eth_account
+// recover_message(encode_defunct(text=msg)) on the bot. Pass the bytes as hex so wallets sign them exactly.
+const toHexUtf8 = s => '0x' + Array.from(new TextEncoder().encode(s)).map(b => b.toString(16).padStart(2, '0')).join('');
+
+$('connect').onclick = async () => {
+  setErr('');
+  if (!window.ethereum) {
+    setErr('No web3 wallet detected. On mobile, open this page inside your wallet app’s browser (e.g. MetaMask).');
+    return;
+  }
+  try {
+    const accts = await window.ethereum.request({ method: 'eth_requestAccounts' });
+    account = (accts && accts[0]) ? accts[0] : null;
+    if (!account) { setErr('No account returned.'); return; }
+    $('acct').innerHTML = 'Connected: <span class="mono">' + account + '</span>';
+    $('sign').disabled = false;
+  } catch (e) { setErr('Wallet connection was rejected.'); }
+};
+
+$('sign').onclick = async () => {
+  setErr('');
+  if (!account) { setErr('Connect your wallet first.'); return; }
+  const amount = $('amount').value.trim();
+  const toXmr  = $('toxmr').value.trim();
+  const amt = parseFloat(amount);
+  if (!(amt > 0)) { setErr('Enter a valid amount.'); return; }
+  if (amt < DESK.minUsdc || amt > DESK.maxUsdc) { setErr('Amount must be between ' + DESK.minUsdc + ' and ' + DESK.maxUsdc + ' USDC.'); return; }
+  if (!looksXmr(toXmr)) { setErr('That doesn’t look like a Monero address (starts 4 or 8; 95 or 106 characters).'); return; }
+
+  const nonce  = Date.now() + '-' + Math.random().toString(16).slice(2, 10);
+  const expiry = Math.floor(Date.now() / 1000) + DESK.expirySeconds;
+  const msg = canonical(amount, account, toXmr, nonce, String(expiry));
+
+  let sig;
+  try {
+    sig = await window.ethereum.request({ method: 'personal_sign', params: [toHexUtf8(msg), account] });
+  } catch (e) { setErr('Signature was rejected in your wallet.'); return; }
+  if (!/^0x[0-9a-fA-F]{130}$/.test(sig)) { setErr('Unexpected signature format from wallet.'); return; }
+
+  const order = { amount_usdc: amount, from: account, to_xmr: toXmr, nonce: nonce, expiry: expiry, signature: sig };
+  $('msg').textContent = msg;
+  $('json').value = JSON.stringify(order);
+  $('signo').textContent = DESK.signalNumber;
+  $('amt2').textContent  = amount;
+  $('from2').textContent = account;
+  $('dep').textContent   = DESK.depositAddress;
+  $('out').hidden = false;
+  $('out').scrollIntoView({ behavior: 'smooth', block: 'start' });
+};
+
+$('copy').onclick = async () => {
+  const ta = $('json'); ta.select(); ta.setSelectionRange(0, 99999);
+  try { await navigator.clipboard.writeText(ta.value); }
+  catch (e) { document.execCommand('copy'); }
+  $('copy').textContent = 'Copied ✓';
+  setTimeout(() => { $('copy').textContent = 'Copy order'; }, 1500);
+};
+</script>
+</body>
+</html>
