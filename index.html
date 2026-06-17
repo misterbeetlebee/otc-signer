@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Wagyu OTC — Sign a Swap Order</title>
+<title>Veil OTC — Sign a Swap Order</title>
 <style>
   :root { --bg:#0f1216; --card:#171b21; --line:#2a313b; --fg:#e8edf2; --muted:#8b97a6;
           --accent:#3ea76a; --accent2:#2c855380; --warn:#e0b341; --err:#e0594b; }
@@ -39,7 +39,7 @@
 </head>
 <body>
 <main>
-  <h1>Wagyu OTC — Sign a Swap Order</h1>
+  <h1>Veil OTC — Sign a Swap Order</h1>
   <p class="sub">Swap USDC (Arbitrum) → XMR. You authorize each order by signing it with your own
   wallet — copy the result into Signal.</p>
 
@@ -104,7 +104,7 @@ const looksXmr = a => /^[0-9A-Za-z]+$/.test(a) && (a.length === 95 || a.length =
 // 7 lines, '\n'-joined, no trailing newline, fields verbatim. Any change → different signer.
 function canonical(amount, from, toXmr, nonce, expiry) {
   return [
-    "Wagyu OTC Swap Order", "version:1",
+    "OTC Swap Order", "version:1",
     "amount_usdc:" + amount, "from:" + from, "to_xmr:" + toXmr,
     "nonce:" + nonce, "expiry:" + expiry,
   ].join("\n");
