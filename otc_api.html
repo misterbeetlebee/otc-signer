@@ -1,0 +1,155 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Veil OTC Swap — Client API</title>
+<style>
+  :root { --bg:#0f1216; --card:#171b21; --line:#2a313b; --fg:#e8edf2; --muted:#8b97a6;
+          --accent:#3ea76a; --warn:#e0b341; --code:#0c0f13; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg);
+         font:15px/1.6 system-ui,-apple-system,Segoe UI,Roboto,sans-serif; }
+  main { max-width:760px; margin:0 auto; padding:20px 18px 80px; }
+  a { color:var(--accent); }
+  .back { display:inline-block; margin:4px 0 18px; font-size:14px; text-decoration:none; }
+  .back:hover { text-decoration:underline; }
+  h1 { font-size:23px; margin:6px 0 14px; }
+  h2 { font-size:18px; margin:34px 0 10px; padding-top:14px; border-top:1px solid var(--line); }
+  h3 { font-size:15px; margin:22px 0 8px; color:var(--muted); text-transform:uppercase;
+       letter-spacing:.04em; }
+  p { margin:10px 0; }
+  code { background:var(--code); padding:2px 5px; border-radius:5px;
+         font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:13px; word-break:break-word; }
+  pre { background:var(--code); border:1px solid var(--line); border-radius:9px; padding:13px;
+        overflow:auto; }
+  pre code { background:none; padding:0; font-size:12.5px; line-height:1.5; white-space:pre; }
+  table { border-collapse:collapse; width:100%; margin:12px 0; font-size:13.5px; }
+  th,td { border:1px solid var(--line); padding:8px 10px; text-align:left; vertical-align:top; }
+  th { background:#1d232b; }
+  blockquote { border-left:3px solid var(--warn); background:#241f10; margin:14px 0;
+        padding:2px 14px; border-radius:6px; }
+  ul,ol { padding-left:22px; }
+  li { margin:6px 0; }
+  hr { border:0; border-top:1px solid var(--line); margin:26px 0; }
+  .foot { color:var(--muted); font-size:13px; margin-top:30px; }
+</style>
+</head>
+<body>
+<main>
+<a class="back" href="./">&larr; Back to the signer</a>
+<h1>Veil OTC Swap — Client API</h1>
+<p>Swap <strong>USDC (Arbitrum) → XMR (Monero)</strong> by submitting a <em>signed order</em> over Signal, then sending the USDC. The desk buys XMR at the floating market rate and sends it to the Monero address you named in the order.</p>
+<p>You stay in control of where funds go: <strong>every order is signed by the wallet you send from.</strong> Even if your Signal messages were intercepted, nobody can redirect your XMR — the destination is part of what you cryptographically sign, and only your private key can produce that signature.</p>
+<hr>
+<h2>1. How it works (the flow)</h2>
+<pre><code>  1. You build an order:  amount, from-address, destination-XMR-address
+  2. You SIGN it with the private key of the from-address
+  3. You send the signed order to the desk over Signal
+        → desk replies "ACCEPTED" (or an error)
+  4. You send the USDC on Arbitrum, from that exact from-address, to the desk address
+  5. Desk detects the deposit, matches it to your signed order, buys XMR,
+     and sends it to your destination address
+        → desk replies with a receipt (Monero txid)</code></pre>
+<p>Order of steps 2–4 matters: <strong>submit the signed order first, then send the USDC.</strong> The deposit is matched to a <em>pending</em> order by <code>(from-address, amount)</code>. If you send funds with no matching order on file, the desk holds them for manual handling — it will not auto-guess a destination.</p>
+<hr>
+<h2>2. The order</h2>
+<p>An order is a small JSON object with six fields:</p>
+<pre><code class="lang-json">{
+  "amount_usdc": "250",
+  "from":        "0xYourArbitrumAddress",
+  "to_xmr":      "8YourMoneroDestinationAddress",
+  "nonce":       "1718600000-abc",
+  "expiry":      1718603600,
+  "signature":   "0x….(130 hex chars)"
+}</code></pre>
+<table><thead><tr><th>field</th><th>meaning</th></tr></thead><tbody><tr><td><code>amount_usdc</code></td><td>USDC you will send. Send <strong>exactly</strong> this (USDC has 6 decimals). String, e.g. <code>"250"</code>.</td></tr><tr><td><code>from</code></td><td>The Arbitrum address you will send the USDC <strong>from</strong>. Must be one of your registered wallet's addresses.</td></tr><tr><td><code>to_xmr</code></td><td>Monero address to receive the XMR. Standard (<code>4…</code>) or sub-address (<code>8…</code>). Can differ for every swap.</td></tr><tr><td><code>nonce</code></td><td>Any unique string you have never used before. <strong>Single-use</strong> — a repeated nonce is rejected (replay protection). A timestamp + random suffix works well.</td></tr><tr><td><code>expiry</code></td><td>Unix timestamp after which the order is dead. Use ~1 hour out. If the deposit doesn't arrive before this, the order expires and you sign a new one.</td></tr><tr><td><code>signature</code></td><td>EIP-191 <code>personal_sign</code> over the canonical message below, signed with the <strong>private key of <code>from</code></strong>.</td></tr></tbody></table>
+<h3>2.1 The canonical message (what you sign)</h3>
+<p>You sign this exact text — seven lines, joined by single <code>\n</code> newlines, <strong>no trailing newline</strong>:</p>
+<pre><code>OTC Swap Order
+version:1
+amount_usdc:&lt;amount_usdc&gt;
+from:&lt;from&gt;
+to_xmr:&lt;to_xmr&gt;
+nonce:&lt;nonce&gt;
+expiry:&lt;expiry&gt;</code></pre>
+<p>The values are used <strong>verbatim</strong> as strings. In particular:</p>
+<ul><li><code>to_xmr</code> is <strong>case-sensitive</strong> — sign it exactly as your Monero wallet shows it.</li><li><code>amount_usdc</code> and <code>expiry</code> are signed as the same strings you put in the JSON (e.g. <code>250</code>, not <code>250.0</code>). Keep them identical in the message and the JSON.</li></ul>
+<p>A concrete signed message looks like:</p>
+<pre><code>OTC Swap Order
+version:1
+amount_usdc:250
+from:0x47949a2614080287F4f333f1419e0FB3e99fcF73
+to_xmr:85FP5pAhMHtjJ7dHn5yCh9Rss1wHEGReAepzLDt55N5h6JEPyW7cFDRFmP4TTDSfZHJC2qHae9gfh8jAvDNozeGtFWVPjZt
+nonce:1718600000-abc
+expiry:1718603600</code></pre>
+<hr>
+<h2>3. Signing scripts</h2>
+<p>You need code (a wallet UI can't reproduce this exact message). Pick your language.</p>
+<h3>Python (<code>eth-account</code>)</h3>
+<pre><code class="lang-python"># pip install eth-account
+import time, secrets, json
+from eth_account import Account
+from eth_account.messages import encode_defunct
+
+PRIVATE_KEY = "0x…"                 # the private key of your `from` address
+AMOUNT      = "250"                 # USDC, exact
+TO_XMR      = "8…"                  # destination Monero address
+
+acct   = Account.from_key(PRIVATE_KEY)
+nonce  = f"{int(time.time())}-{secrets.token_hex(4)}"
+expiry = int(time.time()) + 3600    # valid 1 hour
+
+msg = "\n".join([
+    "OTC Swap Order", "version:1",
+    f"amount_usdc:{AMOUNT}", f"from:{acct.address}",
+    f"to_xmr:{TO_XMR}", f"nonce:{nonce}", f"expiry:{expiry}",
+])
+sig = Account.sign_message(encode_defunct(text=msg), acct.key).signature.hex()
+
+print(json.dumps({
+    "amount_usdc": AMOUNT, "from": acct.address, "to_xmr": TO_XMR,
+    "nonce": nonce, "expiry": expiry,
+    "signature": sig if sig.startswith("0x") else "0x" + sig,
+}))</code></pre>
+<h3>JavaScript (<code>ethers</code> v6)</h3>
+<pre><code class="lang-js">// npm i ethers
+import { Wallet } from "ethers";
+
+const PRIVATE_KEY = "0x…";
+const AMOUNT = "250";
+const TO_XMR = "8…";
+
+const w = new Wallet(PRIVATE_KEY);
+const nonce  = `${Math.floor(Date.now()/1000)}-${Math.random().toString(16).slice(2,10)}`;
+const expiry = Math.floor(Date.now()/1000) + 3600;
+
+const msg = [
+  "OTC Swap Order", "version:1",
+  `amount_usdc:${AMOUNT}`, `from:${w.address}`,
+  `to_xmr:${TO_XMR}`, `nonce:${nonce}`, `expiry:${expiry}`,
+].join("\n");
+
+const signature = await w.signMessage(msg);   // EIP-191 personal_sign
+console.log(JSON.stringify({ amount_usdc: AMOUNT, from: w.address, to_xmr: TO_XMR, nonce, expiry, signature }));</code></pre>
+<p>Both print the JSON object to paste into Signal.</p>
+<hr>
+<h2>4. Submitting over Signal</h2>
+<ol><li>Send the JSON (one message, the whole object) to the desk's Signal number.</li><li>The desk replies:<ul><li><code>✅ ACCEPTED order &lt;nonce&gt; — send &lt;amount&gt; USDC from &lt;from&gt; on Arbitrum.</code> — proceed to send.</li><li><code>❌ REJECTED — &lt;reason&gt;.</code> — fix and resend (a fresh <code>nonce</code>). See §6.</li></ul></li><li>After it's accepted, send the USDC on Arbitrum One:<ul><li><strong>to — the desk address, your ONLY destination:</strong> <code>0x912500ffadc00c6B84F0dA6ACD4433F67D973444</code></li><li><strong>from:</strong> the exact <code>from</code> address you signed.</li><li><strong>amount:</strong> exactly <code>amount_usdc</code>.</li><li><strong>asset:</strong> select <strong>USDC</strong> (native USDC / Circle) by name in your wallet.</li></ul></li><li>Once the deposit confirms and the swap completes, the desk sends a receipt with the Monero txid.</li></ol>
+<blockquote><p>⚠️ <strong>Send only to the desk address above</strong> — <code>0x912500ffadc00c6B84F0dA6ACD4433F67D973444</code>.</p><p>The USDC <strong>token contract</strong> <code>0xaf88d065e77c8cC2239327C5EDb3A432268e5831</code> is <strong>NOT a destination.</strong> It only identifies <em>which</em> asset to send — your wallet uses it to label the token "USDC." Never paste it into the "to"/recipient field: <strong>funds sent to the token contract are permanently lost.</strong></p><p>Send only <strong>native USDC on Arbitrum One</strong>. Bridged USDC, other chains, or other tokens may be lost.</p></blockquote>
+<hr>
+<h2>5. Fees, rate, and limits</h2>
+<ul><li><strong>Rate:</strong> floating. The desk buys at the realized market price when your deposit lands; you take that price (and any slippage). The receipt shows your all-in effective rate.</li><li><strong>Desk fee:</strong> <code>0.4%</code> of the deposit, withheld up front.</li><li><strong>Trading + network fees</strong> (deducted from what you receive): the spot trading fee actually paid on your buy, a fixed ~<code>$1</code> network transfer fee, and the Monero withdrawal fee <code>0.2% + 0.0025 XMR</code>.</li><li><strong>Limits:</strong> min and max per order are set by the desk (currently max <code>50,000 USDC</code>/order). Ask the desk for the current minimum.</li><li><strong>Dust:</strong> if a swap leaves a tiny amount below the payout floor, it is <strong>credited to you</strong> and folded into your next swap — never pocketed.</li></ul>
+<hr>
+<h2>6. Rejections &amp; errors</h2>
+<table><thead><tr><th>reply</th><th>cause</th><th>fix</th></tr></thead><tbody><tr><td><code>signature does not match the from address</code></td><td>the message you signed ≠ the canonical format, or signed with the wrong key</td><td>rebuild the message exactly (§2.1); sign with <code>from</code>'s key</td></tr><tr><td><code>from address is not in the client whitelist</code></td><td>the <code>from</code> address isn't registered with the desk</td><td>use a registered wallet, or ask the desk to add it</td></tr><tr><td><code>order has expired</code></td><td><code>expiry</code> already passed (or clock skew)</td><td>sign a new order with a fresh <code>expiry</code></td></tr><tr><td><code>duplicate nonce for this sender</code></td><td>that <code>nonce</code> was already used</td><td>use a new unique <code>nonce</code></td></tr><tr><td><code>amount … below minimum / above maximum</code></td><td>outside the desk's per-order limits</td><td>adjust the amount</td></tr><tr><td><code>to_xmr is not a Monero address</code></td><td>malformed destination</td><td>check the address (95 or 106 base58 chars, starts <code>4</code> or <code>8</code>)</td></tr></tbody></table>
+<p>If you send USDC <strong>without</strong> a matching accepted order (wrong amount, expired, or none submitted), the desk does not auto-send — it holds the funds and resolves manually. Message the desk.</p>
+<hr>
+<h2>7. Security model (why signed orders)</h2>
+<ul><li>The signature commits to <strong>amount + from + destination + nonce + expiry</strong> together. Changing any one of them invalidates the signature.</li><li>The desk only acts when an <strong>on-chain deposit from <code>from</code></strong> matches a <strong>pending signed order</strong> from <code>from</code>. The deposit proves you funded it; the signature proves you authorized that destination.</li><li>A leaked Signal session or a man-in-the-middle <strong>cannot redirect funds</strong>: they can't forge a signature for a different <code>to_xmr</code> without your private key, and a captured order can't be replayed (single-use <code>nonce</code>, plus <code>expiry</code>).</li><li>Keep your <code>from</code> private key safe. Anyone with it can sign orders <strong>and</strong> spend that wallet directly — the desk's security can't protect a compromised key.</li></ul>
+<hr>
+<p><em>This API is in limited release. Test with a small amount first. Questions → the desk on Signal.</em></p>
+<p class="foot">Questions? Message the desk on Signal.</p>
+</main>
+</body>
+</html>
