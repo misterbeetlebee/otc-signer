@@ -54,11 +54,11 @@
   </div>
 
   <div class="card">
-    <label for="amount">Amount (USDC)</label>
-    <input id="amount" type="text" inputmode="decimal" placeholder="e.g. 250" autocomplete="off">
     <label for="toxmr">Destination Monero address (where you receive XMR)</label>
     <input id="toxmr" type="text" placeholder="4… or 8…" autocomplete="off" spellcheck="false">
-    <p class="muted" style="margin:14px 0 0">A fresh nonce + 1-hour expiry are added automatically.</p>
+    <p class="muted" style="margin:14px 0 0">No amount needed — this order authorizes the desk to
+    swap <b>whatever USDC you send from this wallet</b> to the address above. A fresh nonce + 24-hour
+    expiry are added automatically.</p>
     <div style="margin-top:14px"><button id="sign" disabled>Sign order</button></div>
     <p class="err" id="err"></p>
   </div>
@@ -70,10 +70,12 @@
     <textarea id="json" readonly rows="6"></textarea>
     <div style="margin-top:10px"><button id="copy">Copy order</button></div>
     <div class="warn" style="margin-top:14px">
-      After the desk replies <span class="ok">✅ ACCEPTED</span>, send exactly
-      <b id="amt2"></b> USDC — <b>native USDC on Arbitrum One</b> — <b>from</b>
+      After the desk replies <span class="ok">✅ ACCEPTED</span>, send <b>any amount</b> of
+      <b>native USDC on Arbitrum One</b> — <b>from</b>
       <span class="mono" id="from2"></span> <b>to the desk address:</b><br>
       <code class="mono" id="dep"></code><br>
+      Whatever you send from this wallet is swapped → XMR to the address you signed above
+      (per deposit: <b id="bounds"></b>).<br>
       ⚠️ That is the <b>only</b> destination. Never send to the USDC token contract — funds sent
       there are lost.
     </div>
@@ -87,9 +89,9 @@
 const DESK = {
   signalNumber:   "+18633695803",                                  // where the client sends the signed order
   depositAddress: "0x912500ffadc00c6B84F0dA6ACD4433F67D973444",    // Arbitrum One, native USDC ONLY
-  minUsdc: 10,
-  maxUsdc: 50000,
-  expirySeconds: 3600,
+  minUsdc: 15,        // per-deposit minimum (below this is treated as dust)
+  maxUsdc: 50000,     // per-deposit maximum (a larger deposit parks for manual review)
+  expirySeconds: 86400,   // 24h — the order is a standing authorization valid for this long
 };
 // ───────────────────────────────────────────────────────────────────────────────
 
@@ -101,11 +103,12 @@ const setErr = m => { $('err').textContent = m || ''; };
 const looksXmr = a => /^[0-9A-Za-z]+$/.test(a) && (a.length === 95 || a.length === 106) && (a[0] === '4' || a[0] === '8');
 
 // EXACT canonical message the bot reconstructs + verifies (bot/broker_api.py canonical_message).
-// 7 lines, '\n'-joined, no trailing newline, fields verbatim. Any change → different signer.
-function canonical(amount, from, toXmr, nonce, expiry) {
+// v2 AMOUNT-AGNOSTIC: 6 lines, '\n'-joined, no trailing newline, fields verbatim, NO amount line.
+// Any byte change → different signer (signature won't verify on the desk).
+function canonical(from, toXmr, nonce, expiry) {
   return [
-    "OTC Swap Order", "version:1",
-    "amount_usdc:" + amount, "from:" + from, "to_xmr:" + toXmr,
+    "OTC Swap Order", "version:2",
+    "from:" + from, "to_xmr:" + toXmr,
     "nonce:" + nonce, "expiry:" + expiry,
   ].join("\n");
 }
@@ -131,16 +134,12 @@ $('connect').onclick = async () => {
 $('sign').onclick = async () => {
   setErr('');
   if (!account) { setErr('Connect your wallet first.'); return; }
-  const amount = $('amount').value.trim();
   const toXmr  = $('toxmr').value.trim();
-  const amt = parseFloat(amount);
-  if (!(amt > 0)) { setErr('Enter a valid amount.'); return; }
-  if (amt < DESK.minUsdc || amt > DESK.maxUsdc) { setErr('Amount must be between ' + DESK.minUsdc + ' and ' + DESK.maxUsdc + ' USDC.'); return; }
   if (!looksXmr(toXmr)) { setErr('That doesn’t look like a Monero address (starts 4 or 8; 95 or 106 characters).'); return; }
 
   const nonce  = Date.now() + '-' + Math.random().toString(16).slice(2, 10);
   const expiry = Math.floor(Date.now() / 1000) + DESK.expirySeconds;
-  const msg = canonical(amount, account, toXmr, nonce, String(expiry));
+  const msg = canonical(account, toXmr, nonce, String(expiry));
 
   let sig;
   try {
@@ -148,13 +147,13 @@ $('sign').onclick = async () => {
   } catch (e) { setErr('Signature was rejected in your wallet.'); return; }
   if (!/^0x[0-9a-fA-F]{130}$/.test(sig)) { setErr('Unexpected signature format from wallet.'); return; }
 
-  const order = { amount_usdc: amount, from: account, to_xmr: toXmr, nonce: nonce, expiry: expiry, signature: sig };
+  const order = { from: account, to_xmr: toXmr, nonce: nonce, expiry: expiry, signature: sig };
   $('msg').textContent = msg;
   $('json').value = JSON.stringify(order);
   $('signo').textContent = DESK.signalNumber;
-  $('amt2').textContent  = amount;
   $('from2').textContent = account;
   $('dep').textContent   = DESK.depositAddress;
+  $('bounds').textContent = DESK.minUsdc + '–' + DESK.maxUsdc.toLocaleString() + ' USDC';
   $('out').hidden = false;
   $('out').scrollIntoView({ behavior: 'smooth', block: 'start' });
 };
